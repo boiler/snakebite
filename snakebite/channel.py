@@ -54,7 +54,7 @@ from snakebite.protobuf.datatransfer_pb2 import OpReadBlockProto, BlockOpRespons
 
 from snakebite.platformutils import get_current_username
 from snakebite.formatter import format_bytes
-from snakebite.errors import RequestError, TransientException, FatalException
+from snakebite.errors import RequestError, TransientException, FatalException, RpcResponseError
 from snakebite.crc32c import crc
 
 import google.protobuf.internal.encoder as encoder
@@ -391,31 +391,40 @@ class SocketRpcChannel(RpcChannel):
         log.debug("############## PARSING ##############")
         log.debug("Payload class: %s" % response_class)
 
-        # Read first 4 bytes to get the total length
-        len_bytes = byte_stream.read(4)
-        total_length = struct.unpack("!I", len_bytes)[0]
-        log.debug("Total response length: %s" % total_length)
+        try:
+            # Read first 4 bytes to get the total length
+            len_bytes = byte_stream.read(4)
+            total_length = struct.unpack("!I", len_bytes)[0]
+            log.debug("Total response length: %s" % total_length)
 
-        header = RpcResponseHeaderProto()
-        (header_len, header_bytes) = get_delimited_message_bytes(byte_stream)
+            header = RpcResponseHeaderProto()
+            (header_len, header_bytes) = get_delimited_message_bytes(byte_stream)
 
-        log.debug("Header read %d" % header_len)
-        header.ParseFromString(header_bytes)
-        log_protobuf_message("RpcResponseHeaderProto", header)
+            log.debug("Header read %d" % header_len)
+            header.ParseFromString(header_bytes)
+            log_protobuf_message("RpcResponseHeaderProto", header)
 
-        if header.status == 0:
-            log.debug("header: %s, total: %s" % (header_len, total_length))
-            if header_len >= total_length:
-                return
-            response = response_class()
-            response_bytes = get_delimited_message_bytes(byte_stream, total_length - header_len)[1]
-            if len(response_bytes) > 0:
-                response.ParseFromString(response_bytes)
-                if log.getEffectiveLevel() == logging.DEBUG:
-                    log_protobuf_message("Response", response)
-                return response
-        else:
-            self.handle_error(header)
+            if header.status == 0:
+                log.debug("header: %s, total: %s" % (header_len, total_length))
+                if header_len >= total_length:
+                    return
+                response = response_class()
+                response_bytes = get_delimited_message_bytes(byte_stream, total_length - header_len)[1]
+                if len(response_bytes) > 0:
+                    response.ParseFromString(response_bytes)
+                    if log.getEffectiveLevel() == logging.DEBUG:
+                        log_protobuf_message("Response", response)
+                    return response
+            else:
+                self.handle_error(header)
+        except RequestError:
+            # Thrown by handle_error. No need to wrap.
+            raise
+        except TransientException as e:
+            # An error occurred while reading the response from the NameNode.
+            # Wrap the exception to enable retries in the client while distinguishing
+            # from errors thrown while reading blocks.
+            raise RpcResponseError(e)
 
     def handle_error(self, header):
         raise RequestError("\n".join([header.exceptionClassName, header.errorMsg]))
