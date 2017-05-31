@@ -30,6 +30,7 @@ from snakebite.errors import (
     FatalException, TransientException)
 from snakebite.namenode import Namenode
 from snakebite.service import RpcService
+from snakebite.pipeline import FileWriter
 
 import Queue
 import zlib
@@ -1052,6 +1053,66 @@ class Client(object):
 
         # return a copy, so if the user changes any values, they won't be saved in the client
         return self._server_defaults.copy()
+
+    def copyFromLocal(self, src, dst):
+        # Let's get the blocksize and replication from the server defaults
+        # provided by the namenode if they are not specified
+        defaults = self.serverdefaults()
+        replication = defaults['replication']
+        blocksize = defaults['blockSize']
+
+        dest_dir = dst
+        filename = None
+        if not self.test(dst,exists=True,directory=True):
+            dest_dir = posixpath.dirname(dst)
+            filename = os.path.basename(dst)
+
+        for path in src:
+            item = self._handle_copyFromLocal(path, dest_dir, replication, blocksize, filename)
+            if item:
+                yield item
+
+    def _handle_copyFromLocal(self, local_path, dest_dir, replication, blocksize, dest_filename=None):
+        if dest_filename is None:
+            filename = os.path.basename(local_path)
+        else:
+            filename = dest_filename
+        dest_path = os.path.join(dest_dir, filename)
+
+        writer = self._create_file_writer(dest_path, replication, blocksize)
+        if writer is None:
+            return {"path": local_path, "result": False}
+
+        chunksize = 4096
+        try:
+            with open(local_path, 'rb') as f:
+                while True:
+                    chunk = f.read(chunksize)
+                    if chunk:
+                        written, err = writer.write(chunk)
+                        if err is not None:
+                            return {"path": local_path, "result": err}
+                    else:
+                        break
+        finally:
+            writer.close()
+
+        return {"path": local_path, "result": "ok"}
+
+    def _create_file_writer(self, path, replication, blocksize):
+        # Issue a CreateRequestProto
+        request = client_proto.CreateRequestProto()
+        request.src = path
+        request.masked.perm = 0o644
+        request.clientName = "snakebite"
+        request.createFlag = 0x01
+        request.createParent = False
+        request.replication = replication
+        request.blockSize = blocksize
+
+        # The response doesn't contain anything
+        response = self.service.create(request)
+        return FileWriter(self.service, path, replication, blocksize, response.fs.fileId)
 
     def _is_directory(self, should_check, node):
         if not should_check:
