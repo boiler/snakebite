@@ -176,10 +176,11 @@ class BlockStreamWriter(object):
 
 class BlockWriter(object):
 
-    def __init__(self, block, service, blocksize):
+    def __init__(self, block, service, blocksize, use_datanode_hostname):
         self.block = block
         self.service = service
         self.blocksize = blocksize
+        self.use_datanode_hostname = use_datanode_hostname
 
         if self.block.b.numBytes > 0:
             self.offset = block.b.numBytes
@@ -212,7 +213,11 @@ class BlockWriter(object):
         return (n, error)
 
     def _get_datanode_address(self, datanode):
-        return (datanode.id.ipAddr, datanode.id.xferPort)
+        if self.use_datanode_hostname:
+            ipaddr = socket.gethostbyname(datanode.id.hostName)
+            return (ipaddr, datanode.id.xferPort)
+        else:
+            return (datanode.id.ipAddr, datanode.id.xferPort)
 
     def _connect_next(self):
         host, port = self._get_datanode_address(self._current_pipeline()[0])
@@ -315,13 +320,14 @@ class BlockWriter(object):
 
 
 class FileWriter(object):
-    def __init__(self, service, path, replication, blocksize, file_id):
+    def __init__(self, service, path, replication, blocksize, file_id, use_datanode_hostname=False):
         self.service = service
         self.path = path
         self.replication = replication
         self.blocksize = blocksize
         self.block_writer = None
         self.file_id = file_id
+        self.use_datanode_hostname = use_datanode_hostname
 
         # LocatedBlockProto
         self.block = None
@@ -360,7 +366,7 @@ class FileWriter(object):
         response = self.service.addBlock(request)
         if response is not None:
             self.block = response.block
-            self.block_writer = BlockWriter(self.block, self.service, self.blocksize)
+            self.block_writer = BlockWriter(self.block, self.service, self.blocksize, self.use_datanode_hostname)
 
     def close(self):
         last_block = None

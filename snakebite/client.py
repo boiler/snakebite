@@ -1112,7 +1112,7 @@ class Client(object):
 
         # The response doesn't contain anything
         response = self.service.create(request)
-        return FileWriter(self.service, path, replication, blocksize, response.fs.fileId)
+        return FileWriter(self.service, path, replication, blocksize, response.fs.fileId, self.use_datanode_hostname)
 
     def _is_directory(self, should_check, node):
         if not should_check:
