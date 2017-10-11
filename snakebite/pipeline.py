@@ -114,9 +114,9 @@ class BlockStreamWriter(object):
         if len(self.buf) < self.OUTBOUND_PACKET_SIZE:
             packet_length = len(self.buf)
 
-        alignment = self.OUTBOUND_CHUNK_SIZE - (self.offset % self.OUTBOUND_CHUNK_SIZE)
-        if alignment > 0  or alignment < packet_length:
-            packet_length = alignment
+        alignment = self.offset % self.OUTBOUND_CHUNK_SIZE
+        if alignment > 0 and packet_length > (self.OUTBOUND_CHUNK_SIZE - alignment):
+            packet_length = self.OUTBOUND_CHUNK_SIZE - alignment
 
         num_chunks = int(math.ceil(float(packet_length) / float(self.OUTBOUND_CHUNK_SIZE)))
         packet = Packet(self.seqno, self.offset, False)
