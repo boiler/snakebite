@@ -27,7 +27,8 @@ from snakebite.errors import (
     InvalidInputException,
     OutOfNNException,
     RequestError,
-    FatalException, TransientException)
+    FatalException, TransientException,
+    RpcResponseError)
 from snakebite.namenode import Namenode
 from snakebite.service import RpcService
 
@@ -52,6 +53,15 @@ if sys.version_info[0] == 3:
 
 log = logging.getLogger(__name__)
 
+
+def idempotent(func):
+    '''
+    Used to annotate functions that are idempotent and can safely be retried.
+    :param func: The function to mark as idempotent
+    :return: The same function with the member idempotent set
+    '''
+    func.idempotent = True
+    return func
 
 class Client(object):
     ''' A pure python HDFS client.
@@ -129,6 +139,7 @@ class Client(object):
 
         log.debug("Created client for %s:%s with trash=%s and sasl=%s" % (host, port, use_trash, use_sasl))
 
+    @idempotent
     def ls(self, paths, recurse=False, include_toplevel=False, include_children=True):
         ''' Issues 'ls' command and returns a list of maps that contain fileinfo
 
@@ -846,6 +857,7 @@ class Client(object):
                     error = e
                     yield {"path": path, "response": '', "result": False, "error": error, "source_path": path}
 
+    @idempotent
     def stat(self, paths):
         ''' Stat a fileCount
 
@@ -1491,6 +1503,13 @@ class HAClient(Client):
             self.retries += 1
             return True
 
+    def __handle_response_error(self, exception, idempotent):
+        log.debug("Request failed with %s" % exception)
+        if idempotent and self.__should_retry():
+            return
+        else:
+            raise
+
     def __handle_request_error(self, exception):
         log.debug("Request failed with %s" % exception)
         if exception.args[0].startswith("org.apache.hadoop.ipc.StandbyException"):
@@ -1522,6 +1541,8 @@ class HAClient(Client):
             while(True): # switch between all namenodes
                 try:
                     return func(self, *args, **kw)
+                except RpcResponseError as e:
+                    self.__handle_response_error(e, hasattr(func, 'idempotent'))
                 except RequestError as e:
                     self.__handle_request_error(e)
                 except socket.error as e:
@@ -1538,6 +1559,8 @@ class HAClient(Client):
                     results = func(self, *args, **kw)
                     while(True): # yield all results
                         yield results.next()
+                except RpcResponseError as e:
+                    self.__handle_response_error(e, hasattr(func, 'idempotent'))
                 except RequestError as e:
                     self.__handle_request_error(e)
                 except socket.error as e:
