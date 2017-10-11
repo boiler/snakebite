@@ -672,7 +672,7 @@ class CommandLineParser(object):
             for load in file_to_read:
                 sys.stdout.write(load)
 
-    @command(args="path dst", descr="copy local file reference to destination", req_args=['dir [dirs]', 'arg'], visible=False)
+    @command(args="path dst", descr="copy local file reference to destination", req_args=['dir [dirs]', 'arg'])
     def copyFromLocal(self):
         src = self.args.dir
         dst = self.args.single_arg
