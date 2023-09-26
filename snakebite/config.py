@@ -30,7 +30,7 @@ class HDFSConfig(object):
             'use_trash': hdfs_configs.get('use_trash', core_configs.get('use_trash', False)),
             'use_sasl': core_configs.get('use_sasl', False),
             'hdfs_namenode_principal': hdfs_configs.get('hdfs_namenode_principal', None),
-            'namenodes': hdfs_configs.get('namenodes', []) or core_configs.get('namenodes', [])
+            'nameservices': hdfs_configs.get('nameservices', {}) or core_configs.get('nameservices', {})
         }
 
         return configs
@@ -51,17 +51,18 @@ class HDFSConfig(object):
     def read_core_config(cls, core_site_path):
         configs = {}
 
-        namenodes = []
+        nameservices = {}
         for property in cls.read_hadoop_config(core_site_path):
 
             # fs.default.name is the key name for the file system on EMR clusters
             if property.findall('name')[0].text in ('fs.defaultFS', 'fs.default.name'):
                 parse_result = urlparse(property.findall('value')[0].text)
+                ns = parse_result.netloc
+                nameservices = { ns: {"namenodes": [ns]} }
                 log.debug("Got namenode '%s' from %s" % (parse_result.geturl(), core_site_path))
-
-                namenodes.append({"namenode": parse_result.hostname,
-                               "port": parse_result.port if parse_result.port
-                                                         else Namenode.DEFAULT_PORT})
+                configs['default_scheme'] = parse_result.scheme
+                if parse_result.port is None:
+                    configs['default_nameservice'] = parse_result.hostname
 
             if property.findall('name')[0].text == 'fs.trash.interval':
                 configs['use_trash'] = True
@@ -73,8 +74,8 @@ class HDFSConfig(object):
                 else:
                     configs['use_sasl'] = False
 
-        if namenodes: 
-            configs['namenodes'] = namenodes
+        if nameservices:
+            configs['nameservices'] = nameservices
 
         return configs
 
@@ -82,14 +83,29 @@ class HDFSConfig(object):
     def read_hdfs_config(cls, hdfs_site_path):
         configs = {}
 
-        namenodes = []
+        nameservices_namenodes = {}
+        nameservices_viewfs_links = {}
         for property in cls.read_hadoop_config(hdfs_site_path):
+
             if property.findall('name')[0].text.startswith("dfs.namenode.rpc-address"):
-                parse_result = urlparse("//" + property.findall('value')[0].text)
-                log.debug("Got namenode '%s' from %s" % (parse_result.geturl(), hdfs_site_path))
-                namenodes.append({"namenode": parse_result.hostname,
-                                "port": parse_result.port if parse_result.port
-                                                          else Namenode.DEFAULT_PORT})
+                nameservice = property.findall('name')[0].text.split('.')[3]
+                if not nameservice in nameservices_namenodes.keys():
+                    nameservices_namenodes[nameservice] = []
+                nameservices_namenodes[nameservice].append(property.findall('value')[0].text)
+                #log.debug("Got namenode '%s' from %s" % (parse_result.geturl(), hdfs_site_path))
+
+            if property.findall('name')[0].text.startswith("fs.viewfs.mounttable."):
+                p = property.findall('name')[0].text.split('.')[4]
+                if p in ('link', 'linkFallback'):
+                    nameservice = property.findall('name')[0].text.split('.')[3]
+                    if not nameservice in nameservices_viewfs_links.keys():
+                        nameservices_viewfs_links[nameservice] = {}
+                    parse_result = urlparse(property.findall('value')[0].text)
+                    ns = parse_result.netloc
+                    if not ns in nameservices_namenodes:
+                        nameservices_namenodes[ns] = [ns]
+                    src = '_fallback' if p == 'linkFallback' else property.findall('name')[0].text.split('.',5)[5]
+                    nameservices_viewfs_links[nameservice][src] = (ns, parse_result.path)
 
             if property.findall('name')[0].text == 'fs.trash.interval':
                 configs['use_trash'] = True
@@ -116,8 +132,17 @@ class HDFSConfig(object):
             if property.findall('name')[0].text == 'dfs.client.use.datanode.hostname':
                 configs['use_datanode_hostname'] = bool(property.findall('value')[0].text)
 
-        if namenodes:
-            configs['namenodes'] = namenodes
+        if nameservices_namenodes:
+            configs['nameservices'] = {}
+            for ns, nns in nameservices_namenodes.items():
+                if not ns in configs['nameservices'].keys():
+                    configs['nameservices'][ns] = {}
+                configs['nameservices'][ns]['namenodes'] = nns
+
+        for ns, links in nameservices_viewfs_links.items():
+            if not ns in configs['nameservices']:
+                continue
+            configs['nameservices'][ns]['links'] = links
 
         return configs
 
@@ -131,15 +156,20 @@ class HDFSConfig(object):
 
     @classmethod
     def get_external_config(cls):
-        if os.environ.get('HADOOP_HOME'):
-            hdfs_path = os.path.join(os.environ['HADOOP_HOME'], 'conf', 'hdfs-site.xml')
+        if os.environ.get('SNAKEBITE_HADOOP_CONF_DIR'):
+            hdfs_path = os.path.join(os.environ['SNAKEBITE_HADOOP_CONF_DIR'], 'hdfs-site.xml')
             cls.hdfs_try_paths = (hdfs_path,) + cls.hdfs_try_paths
-            core_path = os.path.join(os.environ['HADOOP_HOME'], 'conf', 'core-site.xml')
+            core_path = os.path.join(os.environ['SNAKEBITE_HADOOP_CONF_DIR'], 'core-site.xml')
             cls.core_try_paths = (core_path,) + cls.core_try_paths
-        if os.environ.get('HADOOP_CONF_DIR'):
+        elif os.environ.get('HADOOP_CONF_DIR'):
             hdfs_path = os.path.join(os.environ['HADOOP_CONF_DIR'], 'hdfs-site.xml')
             cls.hdfs_try_paths = (hdfs_path,) + cls.hdfs_try_paths
             core_path = os.path.join(os.environ['HADOOP_CONF_DIR'], 'core-site.xml')
+            cls.core_try_paths = (core_path,) + cls.core_try_paths
+        elif os.environ.get('HADOOP_HOME'):
+            hdfs_path = os.path.join(os.environ['HADOOP_HOME'], 'conf', 'hdfs-site.xml')
+            cls.hdfs_try_paths = (hdfs_path,) + cls.hdfs_try_paths
+            core_path = os.path.join(os.environ['HADOOP_HOME'], 'conf', 'core-site.xml')
             cls.core_try_paths = (core_path,) + cls.core_try_paths
 
         # Try to find other paths
@@ -159,13 +189,23 @@ class HDFSConfig(object):
             'use_trash': hdfs_configs.get('use_trash', core_configs.get('use_trash', False)),
             'use_sasl': core_configs.get('use_sasl', False),
             'hdfs_namenode_principal': hdfs_configs.get('hdfs_namenode_principal', None),
-            'namenodes': hdfs_configs.get('namenodes', []) or core_configs.get('namenodes', []),
             'client_retries' : hdfs_configs.get('client_retries', 10),
             'client_sleep_base_millis' : hdfs_configs.get('client_sleep_base_millis', 500),
             'client_sleep_max_millis' : hdfs_configs.get('client_sleep_max_millis', 15000),
             'socket_timeout_millis' : hdfs_configs.get('socket_timeout_millis', 60000),
             'failover_max_attempts' : hdfs_configs.get('failover_max_attempts', 15),
-            'use_datanode_hostname' : hdfs_configs.get('use_datanode_hostname', False)
+            'use_datanode_hostname' : hdfs_configs.get('use_datanode_hostname', False),
+            'nameservices' : core_configs.get('nameservices', {}),
         }
+
+        if core_configs.get('default_nameservice') in hdfs_configs.get('nameservices', {}):
+            defaultns = core_configs['default_nameservice']
+            configs['default_nameservice'] = defaultns
+            if core_configs.get('default_scheme') == "viewfs":
+                configs['nameservices'] = hdfs_configs['nameservices']
+                configs['nameservices'][defaultns]['default'] = True
+            else:
+                configs['nameservices'] = { defaultns: {} }
+                configs['nameservices'][defaultns]['namenodes'] = hdfs_configs['nameservices'][defaultns]['namenodes']
 
         return configs

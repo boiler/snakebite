@@ -12,6 +12,7 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under
 # the License.
+1
 
 import argparse
 import errno
@@ -20,7 +21,7 @@ import os
 import json
 from urlparse import urlparse
 
-from snakebite.client import HAClient
+from snakebite.client import MultiHAClient
 from snakebite.errors import FileNotFoundException
 from snakebite.errors import DirectoryException
 from snakebite.errors import FileException
@@ -169,7 +170,7 @@ class CommandLineParser(object):
                 }
 
     def __init__(self):
-        usage = "snakebite [general options] cmd [arguments]"
+        usage = "Xsnakebite [general options] cmd [arguments]"
         epilog = "\ngeneral options:\n"
         epilog += "\n".join(sorted(["  %-30s %s" % ("%s %s" % (v['short'], v['long']), v['help']) for k, v in self.GENERIC_OPTS.iteritems()]))
         epilog += "\n\ncommands:\n"
@@ -179,7 +180,9 @@ class CommandLineParser(object):
         self.parser = Parser(usage=usage, epilog=epilog, formatter_class=argparse.RawTextHelpFormatter, add_help=False)
         self._build_parent_parser()
         self._add_subparsers()
-        self.namenodes = []
+        #self.namenodes = []
+        self.nameservices = {}
+        self.links = None
         self.user = None
         self.use_sasl = False
 
@@ -271,28 +274,49 @@ class CommandLineParser(object):
         self.configs = HDFSConfig.get_external_config()
 
         # Try to retrieve namenode config from within CL arguments
-        if self._read_config_cl():
-            return
+        #if self._read_config_cl():
+        #    return
 
-        config_file = os.path.join(os.path.expanduser('~'), '.snakebiterc')
+        #config_file = os.path.join(os.path.expanduser('~'), '.snakebiterc')
 
-        if os.path.exists(config_file):
+        if False: #os.path.exists(config_file):
             #if ~/.snakebiterc exists - read config from it
-            self._read_config_snakebiterc()
-        elif os.path.exists('/etc/snakebiterc'):
-            self._read_config_snakebiterc('/etc/snakebiterc')
+            #self._read_config_snakebiterc()
+            #print_info("~/.snakebiterc not supported in this version")
+        #elif os.path.exists('/etc/snakebiterc'):
+            #self._read_config_snakebiterc('/etc/snakebiterc')
+            #print_info("/etc/snakebiterc not supported in this version")
+            pass
         else:
             # if configs from HDFS config files exist and contain something
             if self.configs:
-                for config in self.configs['namenodes']:
-                    nn = Namenode(config['namenode'],
-                                  self.__use_cl_port_first(config['port']))
-                    self.namenodes.append(nn)
-                if self.__usetrash_unset():
-                    self.args.usetrash = self.configs['use_trash']
-                self.use_sasl = self.configs['use_sasl']
+                #for config in self.configs['namenodes']:
+                #    nn = Namenode(config['namenode'],
+                #                  self.__use_cl_port_first(config['port']))
+                #    self.namenodes.append(nn)
+                #if self.__usetrash_unset():
+                #    self.args.usetrash = self.configs['use_trash']
+                #self.use_sasl = self.configs['use_sasl']
+                nameservices = {}
+                links = None
+                configs = self.configs
+                hadoop_version = Namenode.DEFAULT_VERSION
+                for ns in configs['nameservices']:
+                    namenodes = []
+                    for nn in configs['nameservices'][ns]['namenodes']:
+                        nnu = urlparse("//" + nn)
+                        namenodes.append(Namenode(nnu.hostname, nnu.port if nnu.port else Namenode.DEFAULT_PORT, hadoop_version))
+                    nameservices[ns] = {"namenodes": namenodes}
+                    if configs['nameservices'][ns].get('default'):
+                        nameservices[ns]['default'] = True
+                        if configs['nameservices'][ns].get('links'):
+                            links = configs['nameservices'][ns]['links']
+                self.nameservices = nameservices
+                self.links = links
 
-        if len(self.namenodes):
+
+        #if len(self.namenodes):
+        if len(self.nameservices):
             return
         else:
             print "No ~/.snakebiterc found, no HADOOP_HOME set and no -n and -p provided"
@@ -314,52 +338,52 @@ class CommandLineParser(object):
 
             sys.exit(1)
 
-    def _read_config_snakebiterc(self, path = os.path.join(os.path.expanduser('~'), '.snakebiterc')):
-        old_version_info = "You're are using snakebite %s with Trash support together with old snakebiterc, please update/remove your %s file. By default Trash is %s." % (path, version(), 'disabled' if not self.configs['use_trash'] else 'enabled')
-        with open(path) as config_file:
-            configs = json.load(config_file)
-
-        if isinstance(configs, list):
-            # Version 1: List of namenodes
-            # config is a list of namenode(s) - possibly HA
-            for config in configs:
-                nn = Namenode(config['namenode'],
-                              self.__use_cl_port_first(config.get('port', Namenode.DEFAULT_PORT)),
-                              config.get('version', Namenode.DEFAULT_VERSION))
-                self.namenodes.append(nn)
-            if self.__usetrash_unset():
-                # commandline setting has higher priority
-                print_info(old_version_info)
-                # There's no info about Trash in version 1, use default policy:
-                self.args.usetrash = self.configs['use_trash']
-        elif isinstance(configs, dict):
-            # Version 2: {}
-            # Can be either new configuration or just one namenode
-            # which was the very first configuration syntax
-            if 'config_version' in configs:
-                # Config version => 2
-                for nn_config in configs['namenodes']:
-                    nn = Namenode(nn_config['host'],
-                                  self.__use_cl_port_first(nn_config.get('port', Namenode.DEFAULT_PORT)),
-                                  nn_config.get('version', Namenode.DEFAULT_VERSION))
-                    self.namenodes.append(nn)
-
-                if self.__usetrash_unset():
-                    # commandline setting has higher priority
-                    self.args.usetrash = configs.get("use_trash", self.configs['use_trash'])
-
-                self.user = configs.get("user")
-            else:
-                # config is a single namenode - no HA
-                self.namenodes.append(Namenode(configs['namenode'],
-                                               self.__use_cl_port_first(configs.get('port', Namenode.DEFAULT_PORT)),
-                                               configs.get('version', Namenode.DEFAULT_VERSION)))
-                if self.__usetrash_unset():
-                    # commandline setting has higher priority
-                    print_info(old_version_info)
-                    self.args.usetrash = self.configs['use_trash']
-        else:
-            print_error_exit("Config retrieved from %s is corrupted! Remove it!" % path)
+#    def _read_config_snakebiterc(self, path = os.path.join(os.path.expanduser('~'), '.snakebiterc')):
+#        old_version_info = "You're are using snakebite %s with Trash support together with old snakebiterc, please update/remove your %s file. By default Trash is %s." % (path, version(), 'disabled' if not self.configs['use_trash'] else 'enabled')
+#        with open(path) as config_file:
+#            configs = json.load(config_file)
+#
+#        if isinstance(configs, list):
+#            # Version 1: List of namenodes
+#            # config is a list of namenode(s) - possibly HA
+#            for config in configs:
+#                nn = Namenode(config['namenode'],
+#                              self.__use_cl_port_first(config.get('port', Namenode.DEFAULT_PORT)),
+#                              config.get('version', Namenode.DEFAULT_VERSION))
+#                self.namenodes.append(nn)
+#            if self.__usetrash_unset():
+#                # commandline setting has higher priority
+#                print_info(old_version_info)
+#                # There's no info about Trash in version 1, use default policy:
+#                self.args.usetrash = self.configs['use_trash']
+#        elif isinstance(configs, dict):
+#            # Version 2: {}
+#            # Can be either new configuration or just one namenode
+#            # which was the very first configuration syntax
+#            if 'config_version' in configs:
+#                # Config version => 2
+#                for nn_config in configs['namenodes']:
+#                    nn = Namenode(nn_config['host'],
+#                                  self.__use_cl_port_first(nn_config.get('port', Namenode.DEFAULT_PORT)),
+#                                  nn_config.get('version', Namenode.DEFAULT_VERSION))
+#                    self.namenodes.append(nn)
+#
+#                if self.__usetrash_unset():
+#                    # commandline setting has higher priority
+#                    self.args.usetrash = configs.get("use_trash", self.configs['use_trash'])
+#
+#                self.user = configs.get("user")
+#            else:
+#                # config is a single namenode - no HA
+#                self.namenodes.append(Namenode(configs['namenode'],
+#                                               self.__use_cl_port_first(configs.get('port', Namenode.DEFAULT_PORT)),
+#                                               configs.get('version', Namenode.DEFAULT_VERSION)))
+#                if self.__usetrash_unset():
+#                    # commandline setting has higher priority
+#                    print_info(old_version_info)
+#                    self.args.usetrash = self.configs['use_trash']
+#        else:
+#            print_error_exit("Config retrieved from %s is corrupted! Remove it!" % path)
 
     def __get_all_directories(self):
         dirs_to_check = []
@@ -378,38 +402,40 @@ class CommandLineParser(object):
 
     def _read_config_cl(self):
         ''' Check if any directory arguments contain hdfs://'''
-        dirs_to_check = self.__get_all_directories()
-        hosts, ports = [], []
-        for path in dirs_to_check:
-            if path.startswith('hdfs://'):
-                parse_result = urlparse(path)
-                hosts.append(parse_result.hostname)
-                ports.append(parse_result.port)
+        #dirs_to_check = self.__get_all_directories()
+        #hosts, ports = [], []
+        #for path in dirs_to_check:
+        #    if path.startswith('hdfs://'):
+        #        parse_result = urlparse(path)
+        #        ns = parse_result.netloc
+        #            self.netservices[ns] = { "namenodes": [ns] }
+                #hosts.append(parse_result.hostname)
+                #ports.append(parse_result.port)
 
         # remove duplicates and None from (hosts + self.args.namenode)
-        hosts = filter(lambda x: x != None, set(hosts + [self.args.namenode]))
-        if len(hosts) > 1:
-            print_error_exit('Conficiting namenode hosts in commandline arguments, hosts: %s' % str(hosts))
+        #hosts = filter(lambda x: x != None, set(hosts + [self.args.namenode]))
+        #if len(hosts) > 1:
+        #    print_error_exit('Conficiting namenode hosts in commandline arguments, hosts: %s' % str(hosts))
 
-        ports = filter(lambda x: x != None, set(ports + [self.args.port]))
-        if len(ports) > 1:
-            print_error_exit('Conflicting namenode ports in commandline arguments, ports: %s' % str(ports))
+        #ports = filter(lambda x: x != None, set(ports + [self.args.port]))
+        #if len(ports) > 1:
+        #    print_error_exit('Conflicting namenode ports in commandline arguments, ports: %s' % str(ports))
 
         # Store port from CL in arguments - CL port has the highest priority
-        if len(ports) == 1:
-            self.args.port = ports[0]
+        #if len(ports) == 1:
+        #    self.args.port = ports[0]
 
         # do we agree on one namenode?
-        if len(hosts) == 1 and len(ports) <= 1:
-            self.args.namenode = hosts[0]
-            self.args.port = ports[0] if len(ports) == 1 else Namenode.DEFAULT_PORT
-            self.namenodes.append(Namenode(self.args.namenode, self.args.port))
-            # we got the info from CL -> check if use_trash is set - if not use default policy:
-            if self.__usetrash_unset():
-                self.args.usetrash = self.configs['use_trash']
-            return True
-        else:
-            return False
+        #if len(hosts) == 1 and len(ports) <= 1:
+        #    self.args.namenode = hosts[0]
+        #    self.args.port = ports[0] if len(ports) == 1 else Namenode.DEFAULT_PORT
+        #    self.namenodes.append(Namenode(self.args.namenode, self.args.port))
+        #    # we got the info from CL -> check if use_trash is set - if not use default policy:
+        #    if self.__usetrash_unset():
+        #        self.args.usetrash = self.configs['use_trash']
+        #    return True
+        #else:
+        #    return False
 
     def parse(self, non_cli_input=None):  # Allow input for testing purposes
         if not sys.argv[1:] and not non_cli_input:
@@ -439,14 +465,21 @@ class CommandLineParser(object):
         return self.args
 
     def setup_client(self):
-        if 'skiptrash' in self.args:
-            use_trash = self.args.usetrash and not self.args.skiptrash
-        else:
-            use_trash = self.args.usetrash
-        self.client = HAClient(self.namenodes, use_trash, self.user, self.use_sasl, self.configs['hdfs_namenode_principal'],
-                               self.configs['failover_max_attempts'], self.configs['client_retries'],
-                               self.configs['client_sleep_base_millis'], self.configs['client_sleep_max_millis'],
-                               self.configs['socket_timeout_millis'], use_datanode_hostname=self.configs['use_datanode_hostname'])
+        #if 'skiptrash' in self.args:
+        #    use_trash = self.args.usetrash and not self.args.skiptrash
+        #else:
+        #    use_trash = self.args.usetrash
+        configs = self.configs
+        #self.client = MultiHAClient(self.nameservices, self.links, configs.get('use_trash', False), effective_user, , self.configs['hdfs_namenode_principal'],
+        #                       self.configs['failover_max_attempts'], self.configs['client_retries'],
+        #                       self.configs['client_sleep_base_millis'], self.configs['client_sleep_max_millis'],
+        #                       self.configs['socket_timeout_millis'], use_datanode_hostname=self.configs['use_datanode_hostname'])
+        self.client = MultiHAClient(self.nameservices, self.links, configs.get('use_trash', False), self.user,
+                                    configs.get('use_sasl', False), configs.get('hdfs_namenode_principal', None),
+                                    configs.get('failover_max_attempts'), configs.get('client_retries'),
+                                    configs.get('client_sleep_base_millis'), configs.get('client_sleep_max_millis'),
+                                    10000, configs.get('socket_timeout_millis'),
+                                    use_datanode_hostname=configs.get('use_datanode_hostname', False))
 
     def execute(self):
         if self.args.help:

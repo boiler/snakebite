@@ -31,6 +31,7 @@ from snakebite.errors import (
 from snakebite.namenode import Namenode
 from snakebite.service import RpcService
 from snakebite.pipeline import FileWriter
+from urlparse import urlparse
 
 import Queue
 import zlib
@@ -1630,7 +1631,161 @@ class HAClient(Client):
 
 HAClient._wrap_methods()
 
-class AutoConfigClient(HAClient):
+class MultiHAClient(object):
+    def __init__(self, nameservices, links, use_trash=False, effective_user=None, use_sasl=False, hdfs_namenode_principal=None,
+                 max_failovers=15, max_retries=10, base_sleep=500, max_sleep=15000, sock_connect_timeout=10000,
+                 sock_request_timeout=10000, use_datanode_hostname=False):
+        if not nameservices:
+            raise InvalidInputException("List of nameservices is empty")
+        nolinks = []
+        self.nsclients = {}
+        self.links = links
+        self.default_nameservice = nameservices.keys()[0] if len(nameservices) == 1 else None
+        for ns, d in nameservices.items():
+            if d.get('default'):
+                self.default_nameservice = ns
+            self.nsclients[ns] = HAClient(d['namenodes'], use_trash, effective_user, use_sasl, hdfs_namenode_principal,
+                                          max_failovers, max_retries, base_sleep, max_sleep, sock_connect_timeout,
+                                          sock_request_timeout, use_datanode_hostname)
+        if not self.default_nameservice:
+            raise InvalidInputException("No default nameservice")
+
+    def _get_ns(self, path):
+        if not self.links:
+            return self.default_nameservice
+        for k in reversed(sorted(self.links.keys())):
+            if path == k or path.startswith(k+'/'):
+                return self.links[k][0]
+        if self.links.get('_fallback'):
+            return self.links['_fallback'][0]
+        raise FileNotFoundException("`%s': No such file or directory" % path)
+
+    def _get_path(self, path):
+        if not self.links:
+            return path
+        for k in reversed(sorted(self.links.keys())):
+            if path == k or path.startswith(k+'/'):
+                return self.links[k][1] + path[len(k):]
+        if self.links.get('_fallback'):
+            return self.links['_fallback'][1] + path[len(k):]
+        raise FileNotFoundException("`%s': No such file or directory" % path)
+
+    def _get_client(self, path):
+        #print "----", path, self._get_ns(path), self._get_path(path)
+        return self.nsclients[self._get_ns(path)]
+
+    def _call_client(self, client_func, paths, *args, **kwargs):
+        for path in paths:
+            #print "--", client_func, path, self._get_ns(path), self._get_path(path)
+            f = getattr(self._get_client(path), client_func)
+            for r in f([self._get_path(path)], *args, **kwargs):
+                yield r
+
+    def chmod(self, paths, *args, **kwargs):
+        for r in self._call_client('chmod', paths, *args, **kwargs):
+            yield r
+
+    def chown(self, paths, *args, **kwargs):
+        for r in self._call_client('chown', paths, *args, **kwargs):
+            yield r
+
+    def chgrp(self, paths, *args, **kwargs):
+        for r in self._call_client('chgrp', paths, *args, **kwargs):
+            yield r
+
+    def count(self, paths, *args, **kwargs):
+        for r in self._call_client('count', paths, *args, **kwargs):
+            yield r
+
+    def du(self, paths, *args, **kwargs):
+        for r in self._call_client('du', paths, *args, **kwargs):
+            yield r
+
+    def delete(self, paths, *args, **kwargs):
+        for r in self._call_client('delete', paths, *args, **kwargs):
+            yield r
+
+    def rmdir(self, paths, *args, **kwargs):
+        for r in self._call_client('rmdir', paths, *args, **kwargs):
+            yield r
+
+    def touchz(self, paths, *args, **kwargs):
+        for r in self._call_client('touchz', paths, *args, **kwargs):
+            yield r
+
+    def setrep(self, paths, *args, **kwargs):
+        for r in self._call_client('setrep', paths, *args, **kwargs):
+            yield r
+
+    def cat(self, paths, *args, **kwargs):
+        for r in self._call_client('cat', paths, *args, **kwargs):
+            yield r
+
+    def copyToLocal(self, paths, *args, **kwargs):
+        for r in self._call_client('copyToLocal', paths, *args, **kwargs):
+            yield r
+
+    def tail(self, path, *args, **kwargs):
+        for r in self._call_client('tail', paths, *args, **kwargs):
+            yield r
+
+    def text(self, paths, *args, **kwargs):
+        for r in self._call_client('text', paths, *args, **kwargs):
+            yield r
+
+    def mkdir(self, paths, *args, **kwargs):
+        for r in self._call_client('mkdir', paths, *args, **kwargs):
+            yield r
+
+    def copyFromLocal(self, paths, *args, **kwargs):
+        for r in self._call_client('copyFromLocal', paths, *args, **kwargs):
+            yield r
+
+    def ls(self, paths, *args, **kwargs):
+        for path in paths:
+            for r in self._get_client(path).ls([self._get_path(path)], *args, **kwargs):
+                r['nameservice'] = self._get_ns(path)
+                yield r
+
+    def df(self, nameservice=None):
+        if not nameservice:
+            nameservice = self.default_nameservice
+        return self.nsclients[nameservice].df()
+
+    def rename(self, paths, dst):
+        for path in paths:
+            if self._get_ns(path) != self._get_ns(dst):
+                raise InvalidInputException("Does not match target filesystem")
+        for r in self._call_client('rename', paths, *args, **kwargs):
+            yield r
+
+    def rename2(self, path, dst, overwriteDest=False):
+        for path in paths:
+            if self._get_ns(path) != self._get_ns(dst):
+                raise InvalidInputException("Does not match target filesystem")
+        for r in self._get_client(path).rename2(self._get_path(path), dst, overwriteDest):
+            yield r
+
+    def getmerge(self, path, dst, newline=False, check_crc=False):
+        yield self._get_client(path).getmerge(self._get_path(path), dst, newline, check_crc)
+
+    def stat(self, paths):
+        for path in paths:
+            r = self._get_client(path).stat([self._get_path(path)])
+            r['nameservice'] = self._get_ns(path)
+            return r
+            # bullshit, I know, but see original implementation
+
+    def test(self, path, exists=False, directory=False, zero_length=False):
+        return self._get_client(path).test(self._get_path(path), exists, directory, zero_length)
+
+    def serverdefaults(self, force_reload=False, nameservice=None):
+        if not nameservice:
+            nameservice = self.default_nameservice
+        return self.nsclients[nameservice].serverdefaults(force_reload)
+
+
+class AutoConfigClient(MultiHAClient):
     ''' A pure python HDFS client that support HA and is auto configured through the ``HADOOP_HOME`` environment variable.
 
     HAClient is fully backwards compatible with the vanilla Client and can be used for a non HA cluster as well.
@@ -1661,11 +1816,20 @@ class AutoConfigClient(HAClient):
         '''
 
         configs = HDFSConfig.get_external_config()
-        nns = [Namenode(nn['namenode'], nn['port'], hadoop_version) for nn in configs['namenodes']]
-        if not nns:
-            raise InvalidInputException("List of namenodes is empty - couldn't create the client")
+        nameservices = {}
+        links = None
+        for ns in configs['nameservices']:
+            namenodes = []
+            for nn in configs['nameservices'][ns]['namenodes']:
+                nnu = urlparse("//" + nn)
+                namenodes.append(Namenode(nnu.hostname, nnu.port if nnu.port else Namenode.DEFAULT_PORT, hadoop_version))
+            nameservices[ns] = {"namenodes": namenodes}
+            if configs['nameservices'][ns].get('default'):
+                nameservices[ns]['default'] = True
+                if configs['nameservices'][ns].get('links'):
+                    links = configs['nameservices'][ns]['links']
 
-        super(AutoConfigClient, self).__init__(nns, configs.get('use_trash', False), effective_user,
+        super(AutoConfigClient, self).__init__(nameservices, links, configs.get('use_trash', False), effective_user,
                                                configs.get('use_sasl', False), configs.get('hdfs_namenode_principal', None),
                                                configs.get('failover_max_attempts'), configs.get('client_retries'),
                                                configs.get('client_sleep_base_millis'), configs.get('client_sleep_max_millis'),
